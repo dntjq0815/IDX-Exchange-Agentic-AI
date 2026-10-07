@@ -1,31 +1,14 @@
-# Week 1 — OpenClaw Architecture
+# Week 1 architecture notes
 
-Architecture for the IDX Exchange multi-agent assistant. This document is the Week 1 deliverable: how a user query moves from WhatsApp through the OpenClaw runtime and skills to the MLS databases, and how the response comes back.
+Week 1 is about getting the shape down before any of the skills exist. The assistant will live on WhatsApp, run on OpenClaw, and answer from the two MySQL tables imported in Week 0.
 
-Later weeks implement the skills. This document fixes the shape they plug into.
+`rets_property` is the live inventory: about 228k active California listings, 130+ columns. This is what search, recommendations, and the remark embeddings read. `california_sold` is the history: about 439k closed transactions from 2021 through 2025, 46 columns. Comps and market stats come from there. Both tables sit in `idx_exchange`. The dump originally came from `boxgra5_cali`; locally we created a new database and loaded the two SQL files into it.
 
-## 1. What the system is
+OpenClaw already handles channels, sessions, routing, and tool calls. We should not rebuild any of that. Our code is the skills, and the tools those skills call.
 
-A production assistant over two California MLS tables in MySQL database `idx_exchange`:
+## How a message moves
 
-| Table | Role | Scale |
-| --- | --- | --- |
-| `rets_property` | Active listings. Search, discovery, recommendations, embeddings over `L_Remarks`. | ~228K rows, 130+ fields |
-| `california_sold` | Closed transactions. Comps, market stats, price validation. | ~439K rows, 46 fields |
-
-The runtime is [OpenClaw](https://github.com/openclaw/openclaw). It owns channels, sessions, skill routing, tool execution, and memory. Application code is skills and typed tools. It does not reimplement chat transport or session storage.
-
-Source data originally lives in schema `boxgra5_cali`. Local development uses `idx_exchange`, created in Week 0. Join active listings to sold comps with:
-
-```sql
-CAST(rets_property.L_ListingID AS UNSIGNED) = california_sold.ListingKey
-```
-
-City and postal code are the join for market-level analysis when a listing-level key is not required.
-
-## 2. Request path
-
-Every user turn follows one path. Skills and tools change. The path does not.
+Every later week should follow this path. The skills get more specific. The path stays the same.
 
 ```mermaid
 flowchart LR
@@ -40,19 +23,25 @@ flowchart LR
     User --> WA --> RT --> SS --> Tool --> Mem --> Resp --> WA --> User
 ```
 
-| Step | What happens |
-| --- | --- |
-| User | Sends a natural-language message, or confirms an outbound action such as an email. |
-| WhatsApp channel | OpenClaw receives the message, identifies the sender, and attaches it to that user's session. |
-| Runtime | Loads session state, available skills, and tool schemas. Does not query MySQL itself. |
-| Skill selector | Classifies intent and picks one skill, or several skills for a mixed query. |
-| Tool execution | The skill calls typed tools. Tools run parameterized SQL, embeddings, or a draft-only email. |
-| Memory update | Session preferences and the latest result set are written back. Vector memory is updated only when a skill indexes or retrieves embeddings. |
-| Response | The skill returns a structured result. The channel formats it for WhatsApp and sends it. |
+Someone texts the WhatsApp number. OpenClaw receives it, figures out who sent it, and loads that person's session. The runtime then picks a skill. The skill calls a tool, and the tool is the thing that actually talks to MySQL or OpenAI. When the tool comes back, we save anything the next turn will need, format a reply, and send it out WhatsApp.
 
-Email is a second channel with the same runtime path, plus an approval gate before any send. See [Safety constraints](#7-safety-constraints).
+Email, in Week 11, uses this same path. The difference is that a draft gets shown to the user before anything is sent.
 
-## 3. Runtime components
+## Pieces
+
+I want these kept separate, because they are easy to smash together once the code starts.
+
+**Channel.** WhatsApp for now. Email later. This layer only moves messages in and out.
+
+**Orchestrator.** Reads the message and picks a skill. A mixed question can hit two skills, then get stitched into one reply.
+
+**Skill.** What the user is actually asking for: search, market stats, similar homes, a definition, or an email draft.
+
+**Tool.** A normal async function. SQL, embeddings, and email drafts live here. Skills should not open their own database connections. If the parameter binding and the row limit sit in the tool, we only have to get them right in one place.
+
+**Session.** State for the current conversation, keyed by user id. City, budget, beds, the last listings we showed, and which follow-up we asked last.
+
+**Memory.** Two different stores. The session dies with the conversation. The vector index sticks around: listing embeddings, and later the RAG chunks.
 
 ```mermaid
 flowchart TB
@@ -90,20 +79,9 @@ flowchart TB
     Orchestrator --> Email
 ```
 
-| Component | Responsibility | Owns |
-| --- | --- | --- |
-| Channel | Ingress and egress. WhatsApp is the primary interface. Email is draft-then-approve. | Message transport only |
-| Orchestrator | Classifies intent and routes to one or more skills. Merges parallel results. | Routing decision |
-| Skill | One user-facing capability: search, market stats, recommendations, RAG, or email draft. | Prompt, tool choice, response shape |
-| Tool | A typed async function. SQL, embeddings, and email drafts live here. | Side effects, with the guardrails below |
-| Session | Per-user conversation state for the current thread. | City, budget, beds, last results, step |
-| Memory | Short-term session state plus long-term vector storage for remarks and RAG chunks. | What the next turn can recall |
+## Which skill hits which table
 
-Skills do not open database connections. Tools do. That keeps SQL, pagination, and row limits in one place.
-
-## 4. Skills and the databases they touch
-
-Week 1 does not implement these skills. The diagram is the target map so each later week has a single place to land.
+None of these skills exist yet. This is the map so Week 2 does not invent a second way in.
 
 ```mermaid
 flowchart TB
@@ -133,21 +111,21 @@ flowchart TB
     Mail --> Draft[Draft pending approval]
 ```
 
-| Skill | Week | Reads | Writes |
-| --- | --- | --- | --- |
-| `propertySearchAgent` | 2–4 | `rets_property` filtered listings | Session filters and `lastResults` |
-| `marketStatsAgent` | 5 | `california_sold` aggregates | Nothing persistent |
-| `recommendationAgent` | 6–7 | `rets_property` plus sold comps for price check | Nothing persistent |
-| `ragAgent` | 8 | Chunk index built from field definitions and glossary | Index at build time only |
-| `emailDraftAgent` | 11 | Results already produced by the other skills | A draft with status `pending_approval` |
+Property search (Weeks 2–4) reads `rets_property` and writes the filters plus `lastResults` onto the session.
 
-Intent labels the orchestrator uses once all skills exist: `search`, `market`, `recommend`, `knowledge`, `mixed`. A mixed query such as "affordable homes in Pasadena and are prices rising" runs `propertySearchAgent` and `marketStatsAgent` in parallel, then merges the two results into one reply.
+Market stats (Week 5) aggregates `california_sold`. Nothing to store after the reply goes out.
 
-## 5. Workflow walkthrough
+Recommendations (Weeks 6–7) score active listings, then check the price against recent sold comps.
 
-### Property search
+The RAG skill (Week 8) answers from indexed docs: field definitions, a glossary, market writeups. A question like "what does DOM mean?" should not turn into a listing query.
 
-User: "Show me 3-bedroom condos in Irvine under $1.5M with a pool."
+Email (Week 11) only drafts. It uses results the other skills already produced, and the draft sits at `pending_approval` until the user confirms.
+
+Once the orchestrator is real, the intent labels are `search`, `market`, `recommend`, `knowledge`, and `mixed`. "Find me affordable homes in Pasadena and tell me if prices are rising" is the mixed case: property search and market stats run together, then one reply.
+
+## A search, end to end
+
+Take "Show me 3-bedroom condos in Irvine under $1.5M with a pool."
 
 ```mermaid
 sequenceDiagram
@@ -170,129 +148,64 @@ sequenceDiagram
     WA-->>User: Formatted listings
 ```
 
-The parser (Week 2) turns text into a filter object. The query tool (Week 3) binds those values as SQL parameters. The conversational layer (Week 4) asks for missing filters and stores them on the session instead of requiring the full query in one message.
+Week 2 turns that sentence into a filter object. Week 3 binds the values as SQL parameters. Week 4 is the messier version, where the user says "homes in Irvine" and we have to ask for budget and property type before running anything.
 
-Filters map to `rets_property` as follows.
+The `rets_property` column names do not match the words users say, so here is the mapping I am using:
 
-| Filter | Column |
-| --- | --- |
-| City | `L_City` |
-| Max price | `L_SystemPrice` |
-| Min bedrooms | `L_Keyword2` |
-| Min bathrooms | `LM_Dec_3` |
-| Min square feet | `LM_Int2_3` |
-| Property type | `L_Type_` |
-| Pool | `PoolPrivateYN` |
-| View | `ViewYN` |
-| Max HOA | `AssociationFee` |
+- city → `L_City`
+- max price → `L_SystemPrice`
+- bedrooms → `L_Keyword2` (just an int; the name does not say bedrooms)
+- bathrooms → `LM_Dec_3` (this one can be 2.5)
+- sqft → `LM_Int2_3`
+- property type → `L_Type_` (`Condominium`, `SingleFamilyResidence`, and so on)
+- pool → `PoolPrivateYN`
+- view → `ViewYN`
+- max HOA → `AssociationFee`
 
-Active search always includes `L_Status = 'Active'` and `LIMIT` / `OFFSET`. Default page size is 10. Hard cap is 50 rows.
+Active search always adds `L_Status = 'Active'`. Page size 10. Hard stop at 50 rows. The handbook is explicit about that cap, and it applies to comps queries too.
 
-### Market question
+Linking an active listing to its sold record:
 
-User: "What is the average price per square foot in Pasadena?"
-
-The orchestrator routes to `marketStatsAgent`. The tool aggregates `california_sold` for that city over a trailing window (default 12 months), restricted to `PropertyType = 'Residential'`. The reply includes median or average close price, days on market, list-to-close ratio, and the 12-month trend. No session filters are required.
-
-### Recommendation
-
-User has a listing in `session.lastResults` and asks for similar homes.
-
-`recommendationAgent` scores other active rows in `rets_property` with structured features (price, beds, city, square feet) plus cosine similarity on embeddings of listing text. It then checks the suggested price against recent `california_sold` comps in the same city and a square-footage band. The reply is the top 5 listings plus a comp delta.
-
-### Knowledge question
-
-User: "What does DOM mean?"
-
-`ragAgent` embeds the question, retrieves the top chunks from the document index, and answers from that context only. Sources are MLS field definitions, the terminology glossary, and market summaries produced by the analytics skill. This path does not query listing rows.
-
-## 6. Memory
-
-Two stores, different lifetimes.
-
-| Store | Lifetime | Contents | Used by |
-| --- | --- | --- | --- |
-| Session | One conversation, keyed by `userId` | `city`, `maxPrice`, `beds`, `baths`, `type`, `pool`, `lastResults`, `conversationStep` | Search and recommendation follow-ups |
-| Vector index | Persistent across sessions | Listing embeddings from `L_Remarks` and structured fields; RAG chunks | Semantic search, recommendations, knowledge answers |
-
-Session state is required before multi-turn search works. A follow-up ("single family, at least 3 beds") updates the same session and re-runs the listing tool. `clearSession` drops that state.
-
-Vector memory is not the session. Embeddings are built offline or on a sync from `ModificationTimestamp`, then read at query time.
-
-## 7. Safety constraints
-
-These rules are part of the architecture, not a later patch.
-
-| Rule | Where it is enforced |
-| --- | --- |
-| No email is sent without an explicit user confirmation | `draftEmail` returns `pending_approval`. `sendApprovedEmail` runs only after confirmation. |
-| Secrets stay in `.env` | Tools read `OPENAI_API_KEY`, `MYSQL_*`, and `EMAIL_*` from the environment. Logs never include them. |
-| No bulk export of MLS data | Every listing or comps query uses a bound `LIMIT`. Maximum 50 rows. |
-| Outbound and destructive actions need a person | The orchestrator may draft. It may not send, delete, or write back to MLS tables. |
-
-The MySQL account used by tools is read-only on `rets_property` and `california_sold`.
-
-## 8. Deployment view for local development
-
-Week 0 produces this process layout. Week 1 does not add services beyond it.
-
-```mermaid
-flowchart LR
-    Phone[WhatsApp on phone]
-    OC[OpenClaw process]
-    Py[Python tools]
-    SQL[(MySQL localhost idx_exchange)]
-    AI[OpenAI API]
-
-    Phone <--> OC
-    OC --> Py
-    Py --> SQL
-    Py --> AI
+```sql
+CAST(rets_property.L_ListingID AS UNSIGNED) = california_sold.ListingKey
 ```
 
-Environment variables, matching `.env.example`:
+`L_ListingID` is a varchar and `ListingKey` is a bigint, so the cast is required. For a market question ("how is Irvine doing") we skip this join and match on city or ZIP.
 
-| Variable | Use |
-| --- | --- |
-| `OPENAI_API_KEY` | Chat completions and embeddings |
-| `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE` | Pool for both MLS tables. Database is `idx_exchange`. |
-| `EMAIL_USER`, `EMAIL_PASSWORD` | SMTP for approved email only |
+### The other question types
 
-Python dependencies already pinned in `requirements.txt` cover the tool side: `openai`, `mysql-connector-python`, `SQLAlchemy`, `pandas`, `numpy`, `scikit-learn`. OpenClaw itself is the Node runtime installed in Week 0.
+"What is the average price per sqft in Pasadena?" goes to `marketStatsAgent`. Aggregate `california_sold` for that city, `PropertyType = 'Residential'`, trailing 12 months unless the user asks for something else. The reply should cover close price, days on market, list-to-close ratio, and the 12-month trend. No session filters involved.
 
-## 9. Week map
+If the user already has a listing in `lastResults` and asks for similar homes, `recommendationAgent` scores other active rows on price, beds, city, and sqft, plus cosine similarity on the listing embeddings. Then it checks that price against recent comps in the same city, in a band around the listing's square footage. Top 5, with how far the list price sits from those comps.
 
-Each week adds a skill or a channel behavior. None of them replace the request path in section 2.
+"What does DOM mean?" goes to `ragAgent`. Embed the question, pull a few chunks, answer from those chunks. Sources are the field definitions, the glossary, and market summaries from the stats skill.
 
-| Week | Adds |
-| --- | --- |
-| 0 | OpenClaw, MySQL import, WhatsApp login, `.env` |
-| 1 | This architecture |
-| 2 | Filter parser inside `propertySearchAgent` |
-| 3 | Parameterized search and comps tools |
-| 4 | Session memory and follow-up questions |
-| 5 | `marketStatsAgent` |
-| 6 | Listing embedding index and cosine search |
-| 7 | `recommendationAgent` with comp validation |
-| 8 | `ragAgent` and the document index |
-| 9 | Orchestrator over all five skills, including mixed intent |
-| 10 | WhatsApp formatting in front of `orchestrate()` |
-| 11 | `emailDraftAgent` and the approval gate |
-| 12 | Capstone demo of the full path |
+## Session vs embeddings
 
-## 10. Week 1 boundary
+Session is a map on `userId`. I am planning to keep `city`, `maxPrice`, `beds`, `baths`, `type`, `pool`, `lastResults`, and `conversationStep`. A follow-up like "single family, at least 3 beds" updates that same object and runs the search again. `clearSession` drops it.
 
-Documented now:
+Embeddings are a different store. Build them from the listing text (type, city, beds, baths, sqft, year, price, and `L_Remarks`) ahead of time, so a query does not re-embed 228k rows. Refresh when `ModificationTimestamp` moves, or just rerun the batch. RAG chunks use the same idea with different content.
 
-- The single request path from WhatsApp through the runtime to MySQL and back.
-- Component boundaries: channel, orchestrator, skill, tool, session, memory.
-- Which skill reads which table.
-- The session versus vector memory split.
-- The row cap, read-only database role, and email approval gate.
+## Guardrails
 
-Not built in Week 1:
+Putting these in now so they are not a Week 11 surprise.
 
-- Skill implementations, SQL modules, embedding indexes, and the orchestrator `switch`.
-- WhatsApp formatting and the email transporter.
+Email is draft first. `draftEmail` returns `pending_approval`. `sendApprovedEmail` is the only function that talks to SMTP, and it runs after the user confirms.
 
-Those land in the weeks listed above, behind the boundaries in this document.
+Secrets stay in `.env`: `OPENAI_API_KEY`, the `MYSQL_*` variables, `EMAIL_USER`, `EMAIL_PASSWORD`. They do not go in logs.
+
+Every listing or comps query takes a bound `LIMIT`, max 50. We are not exporting the MLS through the agent.
+
+The MySQL user the tools connect with should be read-only on these two tables. The agent can read. It should not update listings, and it should not send mail on its own.
+
+## What is running locally
+
+Week 0 left us with OpenClaw (Node) linked to WhatsApp, MySQL on localhost with `idx_exchange`, and a Python venv for the tools. OpenClaw calls into Python for SQL and embeddings. Python calls OpenAI.
+
+`.env.example` already has the variable names. `requirements.txt` covers the tool side: `openai`, `mysql-connector-python`, `SQLAlchemy`, `pandas`, `numpy`, `scikit-learn`.
+
+## After this week
+
+Week 2 is the filter parser. Week 3 is the parameterized search and comps queries. Week 4 adds the session follow-ups. Week 5 is market stats. Week 6 builds the embedding index. Week 7 is recommendations with the comp check. Week 8 is RAG. Week 9 is the orchestrator, including mixed questions. Week 10 formats replies for WhatsApp. Week 11 is the email draft and the approval gate. Week 12 is the demo.
+
+This week is just the path. Skills start next week.
