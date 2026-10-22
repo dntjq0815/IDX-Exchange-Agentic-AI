@@ -13,6 +13,42 @@ export interface PropertyFilters {
   hasView: string | null;
 }
 
+const PRICE_WORDS =
+  "under|below|less than|at most|max(?:imum)?|budget(?:\\s+is)?|around|about";
+const PRICE_AMOUNT = "\\$?\\s*([\\d,.]+)\\s*(k|m|mil|million)?";
+
+function matchMaxPrice(query: string): RegExpMatchArray | null {
+  const explicit = query.match(
+    new RegExp(`\\b(?:${PRICE_WORDS})\\b\\s*${PRICE_AMOUNT}\\b`, "i")
+  );
+  if (explicit) return explicit;
+  return query
+    .trim()
+    .match(new RegExp(`^${PRICE_AMOUNT}\\s*\\.?\\s*$`, "i"));
+}
+
+function matchPropertyType(query: string): string | null {
+  const text = query.toLowerCase();
+  if (/single[\s-]*family/.test(text)) return "SingleFamilyResidence";
+  if (/town[\s-]*ho(?:me|use)/.test(text)) return "Townhouse";
+  if (/\bcondos?\b|\bcondominiums?\b/.test(text)) return "Condominium";
+  if (/\bhouses?\b/.test(text)) return "SingleFamilyResidence";
+  if (/\bland\b/.test(text)) return "UnimprovedLand";
+  return null;
+}
+
+function scalePrice(amount: string, suffix?: string): number | null {
+  const value = Number(amount.replace(/,/g, ""));
+  if (!Number.isFinite(value)) return null;
+  const unit = suffix?.toLowerCase();
+  if (unit === "k") return value * 1_000;
+  if (unit === "m" || unit === "mil" || unit === "million") return value * 1_000_000;
+  // 1.2 means $1.2M. 900 and 1,200 mean $900k and $1.2M.
+  if (value < 20) return value * 1_000_000;
+  if (value < 10_000) return value * 1_000;
+  return value;
+}
+
 export async function parsePropertyQuery(
   query: string
 ): Promise<PropertyFilters> {
@@ -20,9 +56,7 @@ export async function parsePropertyQuery(
     /in ([A-Za-z\s]+?)(?:\s+under|\s+with|\s+at|$)/i
   );
 
-  const priceMatch = query.match(
-    /under \$?([\d,.]+)\s*(k|m)?\b/i
-  );
+  const priceMatch = matchMaxPrice(query);
 
   const bedsMatch = query.match(
     /(\d+)[\s-]*(bed|beds|bedroom|bedrooms)\b/i
@@ -39,32 +73,9 @@ export async function parsePropertyQuery(
   const poolMatch = /\bpool\b/i.test(query);
   const viewMatch = /\bview\b/i.test(query);
 
-  const typeMap: Record<string, string> = {
-    condo: "Condominium",
-    condominium: "Condominium",
-    townhome: "Townhouse",
-    townhouse: "Townhouse",
-    "single family": "SingleFamilyResidence",
-    land: "UnimprovedLand",
-  };
+  const type = matchPropertyType(query);
 
-  const typeKey = Object.keys(typeMap).find((key) =>
-    query.toLowerCase().includes(key)
-  );
-
-  let maxPrice: number | null = null;
-
-  if (priceMatch) {
-    maxPrice = Number((priceMatch[1] ?? "").replace(/,/g, ""));
-
-    if (priceMatch[2]?.toLowerCase() === "k") {
-      maxPrice *= 1000;
-    }
-
-    if (priceMatch[2]?.toLowerCase() === "m") {
-      maxPrice *= 1_000_000;
-    }
-  }
+  const maxPrice = priceMatch ? scalePrice(priceMatch[1] ?? "", priceMatch[2]) : null;
 
   return {
     city: cityMatch?.[1]?.trim() || null,
@@ -74,7 +85,7 @@ export async function parsePropertyQuery(
     sqft: sqftMatch
       ? Number((sqftMatch[1] ?? "").replace(/,/g, ""))
       : null,
-    type: typeKey ? (typeMap[typeKey] ?? null) : null,
+    type,
     pool: poolMatch ? "True" : null,
     hasView: viewMatch ? "True" : null,
   };
