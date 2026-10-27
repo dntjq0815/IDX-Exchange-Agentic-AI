@@ -6,6 +6,11 @@ import {
   searchActiveListings,
   type ListingRow,
 } from "./listings.ts";
+import {
+  answerMarketQuestion,
+  cityNameOnly,
+  isMarketQuestion,
+} from "./market.ts";
 import { parsePropertyQuery, type PropertyFilters } from "./parser.ts";
 import {
   clearSession,
@@ -117,6 +122,25 @@ export async function handleMessage(
   }
 
   const before = getSession(userId);
+  if (isMarketQuestion(text)) {
+    const answer = await answerMarketQuestion(text);
+    if (!answer) {
+      updateSession(userId, { awaiting: "market", marketQuestion: text });
+      return "Which city do you want the market stats for?";
+    }
+    updateSession(userId, { awaiting: undefined, marketQuestion: undefined });
+    return answer;
+  }
+  if (before.awaiting === "market") {
+    const city = await cityNameOnly(text);
+    if (city) {
+      const question = before.marketQuestion ? `${before.marketQuestion} ${city}` : city;
+      updateSession(userId, { awaiting: undefined, marketQuestion: undefined });
+      return (await answerMarketQuestion(question)) ?? `I don't have sales for ${city}.`;
+    }
+    updateSession(userId, { awaiting: undefined, marketQuestion: undefined });
+  }
+
   let filters = await parsePropertyQuery(text);
 
   if (!filters.city) {
