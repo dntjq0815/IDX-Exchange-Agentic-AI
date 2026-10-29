@@ -39,10 +39,42 @@ interface MonthPoint {
   avgPrice: number;
 }
 
+interface DateWindow {
+  start: string;
+  end: string;
+  label: string;
+}
+
+const MONTH_INDEX: Record<string, number> = {
+  jan: 1, january: 1,
+  feb: 2, february: 2,
+  mar: 3, march: 3,
+  apr: 4, april: 4,
+  may: 5,
+  jun: 6, june: 6,
+  jul: 7, july: 7,
+  aug: 8, august: 8,
+  sep: 9, sept: 9, september: 9,
+  oct: 10, october: 10,
+  nov: 11, november: 11,
+  dec: 12, december: 12,
+};
+
+function asksActiveCount(text: string): boolean {
+  const t = text.toLowerCase();
+  if (/\b(inventory|active listings?|listing count)\b/.test(t)) return true;
+  if (/\b(how many|number of)\b/.test(t) && /\blistings?\b/.test(t)) return true;
+  if (/\bhow many\b/.test(t) && /\b(for sale|on the market|active)\b/.test(t)) return true;
+  return false;
+}
+
 export function isMarketQuestion(text: string): boolean {
-  return /\b(market|markets|price per|per sq|sq\.?\s*ft|good time to buy|median|days on market|list[\s-]*to[\s-]*close|trend|inventory|average price|avg price|appreciation)\b/i.test(
-    text
-  );
+  return asksActiveCount(text)
+    || /\b(market|markets|price per|per sq|sq\.?\s*ft|good time to buy|median|days on market|how many days|list[\s-]*to[\s-]*close|over ask|under ask|asking price|trend|inventory|average price|avg price|appreciation|rising|increasing|decreasing|falling|dropping)\b/i.test(
+      text
+    ) || /\b(price|prices)\b.{0,30}\b(up|down|rising|falling|increasing|decreasing)\b/i.test(text)
+    || /\b(up|down|rising|falling|increasing|decreasing)\b.{0,30}\b(price|prices)\b/i.test(text)
+    || /\bhow(?:'s| is| are) (?:the )?(?:price|prices|trend)\b/i.test(text);
 }
 
 export async function findCity(text: string): Promise<string | null> {
@@ -74,13 +106,88 @@ export async function cityNameOnly(text: string): Promise<string | null> {
   return rows[0]?.City ?? null;
 }
 
-export async function getMarketSummary(city: string): Promise<MarketSummary | null> {
-  const where = `
-    LOWER(City) = LOWER(?)
-    AND PropertyType = 'Residential'
-    AND CloseDate >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
-    AND ClosePrice > 0
-  `;
+function parseDateWindow(text: string): DateWindow | null {
+  const re = /\b(january|february|march|april|may|june|july|august|september|sept|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{4})\b/gi;
+  const hits = [...text.matchAll(re)];
+  if (hits.length === 0) return null;
+  const toParts = (hit: RegExpMatchArray) => ({
+    month: MONTH_INDEX[hit[1].toLowerCase()] ?? 0,
+    year: Number(hit[2]),
+  });
+  let start = toParts(hits[0]);
+  let end = toParts(hits[hits.length - 1]);
+  if (!start.month || !end.month) return null;
+  const startKey = start.year * 12 + start.month;
+  const endKey = end.year * 12 + end.month;
+  if (endKey < startKey) {
+    const swap = start;
+    start = end;
+    end = swap;
+  }
+  const startDate = new Date(Date.UTC(start.year, start.month - 1, 1));
+  const endDate = new Date(Date.UTC(end.year, end.month, 1));
+  const startYm = `${start.year}-${String(start.month).padStart(2, "0")}`;
+  const endYm = `${end.year}-${String(end.month).padStart(2, "0")}`;
+  return {
+    start: startDate.toISOString().slice(0, 10),
+    end: endDate.toISOString().slice(0, 10),
+    label: startYm === endYm ? monthLabel(startYm) : `${monthLabel(startYm)} to ${monthLabel(endYm)}`,
+  };
+}
+
+function soldFilter(window: DateWindow | null): { sql: string; extra: string[] } {
+  if (!window) {
+    return {
+      sql: `
+        LOWER(City) = LOWER(?)
+        AND PropertyType = 'Residential'
+        AND CloseDate >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+        AND ClosePrice > 0
+      `,
+      extra: [],
+    };
+  }
+  return {
+    sql: `
+      LOWER(City) = LOWER(?)
+      AND PropertyType = 'Residential'
+      AND CloseDate >= ?
+      AND CloseDate < ?
+      AND ClosePrice > 0
+    `,
+    extra: [window.start, window.end],
+  };
+}
+
+async function countActive(city: string, type: string | null): Promise<number> {
+  let sql = `SELECT COUNT(*) AS active_count
+     FROM rets_property
+     WHERE LOWER(L_City) = LOWER(?) AND L_Status = 'Active'`;
+  const params: unknown[] = [city];
+  if (type) {
+    sql += " AND L_Type_ = ?";
+    params.push(type);
+  }
+  const [row] = await query<{ active_count: number }>(sql, params);
+  return Number(row?.active_count ?? 0);
+}
+
+function listingKind(type: string | null): string {
+  if (type === "Condominium") return "condo";
+  if (type === "Townhouse") return "townhome";
+  if (type === "SingleFamilyResidence") return "single family";
+  if (type === "UnimprovedLand") return "land";
+  return "";
+}
+
+export async function getMarketSummary(
+  city: string,
+  window: DateWindow | null = null,
+  listingType: string | null = null
+): Promise<MarketSummary | null> {
+  const filter = soldFilter(window);
+  const where = filter.sql;
+  const params = [city, ...filter.extra];
 
   const [summary] = await query<{
     city: string;
@@ -101,7 +208,7 @@ export async function getMarketSummary(city: string): Promise<MarketSummary | nu
        ROUND(AVG(ClosePrice / NULLIF(LivingArea, 0)), 0) AS avg_price_per_sqft
      FROM california_sold
      WHERE ${where}`,
-    [city]
+    params
   );
 
   if (!summary || Number(summary.sold_count) === 0) return null;
@@ -118,15 +225,10 @@ export async function getMarketSummary(city: string): Promise<MarketSummary | nu
      SELECT ROUND(AVG(ClosePrice), 0) AS median_price
      FROM priced
      WHERE rn IN (FLOOR((cnt + 1) / 2), FLOOR((cnt + 2) / 2))`,
-    [city]
+    params
   );
 
-  const [active] = await query<{ active_count: number }>(
-    `SELECT COUNT(*) AS active_count
-     FROM rets_property
-     WHERE LOWER(L_City) = LOWER(?) AND L_Status = 'Active'`,
-    [city]
-  );
+  const activeCount = await countActive(city, listingType);
 
   return {
     city: summary.city || city,
@@ -139,24 +241,25 @@ export async function getMarketSummary(city: string): Promise<MarketSummary | nu
     avgDom: summary.avg_dom == null ? null : Number(summary.avg_dom),
     listToClosePct:
       summary.list_to_close_pct == null ? null : Number(summary.list_to_close_pct),
-    activeCount: Number(active?.active_count ?? 0),
+    activeCount,
   };
 }
 
-export async function getPriceTrend(city: string): Promise<MonthPoint[]> {
+export async function getPriceTrend(
+  city: string,
+  window: DateWindow | null = null
+): Promise<MonthPoint[]> {
+  const filter = soldFilter(window);
   const rows = await query<{ month: string; sales: number; avg_price: number }>(
     `SELECT
        DATE_FORMAT(CloseDate, '%Y-%m') AS month,
        COUNT(*) AS sales,
        ROUND(AVG(ClosePrice), 0) AS avg_price
      FROM california_sold
-     WHERE LOWER(City) = LOWER(?)
-       AND PropertyType = 'Residential'
-       AND CloseDate >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
-       AND ClosePrice > 0
+     WHERE ${filter.sql}
      GROUP BY DATE_FORMAT(CloseDate, '%Y-%m')
      ORDER BY month`,
-    [city]
+    [city, ...filter.extra]
   );
   return rows.map((row) => ({
     month: row.month,
@@ -167,6 +270,20 @@ export async function getPriceTrend(city: string): Promise<MonthPoint[]> {
 
 function money(value: number): string {
   return `$${Math.round(value).toLocaleString("en-US")}`;
+}
+
+export function formatTable(headers: string[], rows: string[][]): string {
+  const widths = headers.map((header, index) =>
+    Math.max(header.length, ...rows.map((row) => (row[index] ?? "").length))
+  );
+  const render = (cells: string[]) =>
+    cells.map((cell, index) => cell.padEnd(widths[index] ?? 0)).join("  ");
+  const lines = [
+    render(headers),
+    render(widths.map((width) => "-".repeat(width))),
+    ...rows.map(render),
+  ];
+  return "```\n" + lines.join("\n") + "\n```";
 }
 
 function monthLabel(ym: string): string {
@@ -194,6 +311,27 @@ function trendSentence(points: MonthPoint[]): string {
   return `Prices are about flat from ${move.span}.`;
 }
 
+function trendAnswer(city: string, points: MonthPoint[]): string {
+  const move = priceChange(points);
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (!move || !first || !last) {
+    return `Not enough months of sales in ${city} to call a trend.`;
+  }
+  const peak = points.reduce((best, point) => point.avgPrice > best.avgPrice ? point : best);
+  const rounded = Math.abs(move.change).toFixed(1);
+  const lead = move.change > 1
+    ? `Prices in ${city} are rising, up ${rounded}% from ${move.span}.`
+    : move.change < -1
+      ? `Prices in ${city} are decreasing, down ${rounded}% from ${move.span}.`
+      : `Prices in ${city} are about flat from ${move.span}.`;
+  const ends = `The average close was ${money(first.avgPrice)} in ${monthLabel(first.month)} and ${money(last.avgPrice)} in ${monthLabel(last.month)}.`;
+  const shape = peak.month === last.month
+    ? ""
+    : ` ${monthLabel(peak.month)} was the high month, at ${money(peak.avgPrice)}, so it has not been a straight line.`;
+  return `${lead} ${ends}${shape}`;
+}
+
 function marketFocus(text: string): MarketFocus {
   const t = text.toLowerCase();
   if (/good time to buy|time to buy|should i buy/.test(t)) return "timing";
@@ -203,10 +341,12 @@ function marketFocus(text: string): MarketFocus {
   }
   if (/median/.test(t)) return "median";
   if (/(average|avg|typical).{0,16}price/.test(t)) return "avgPrice";
-  if (/days on market|\bdom\b|how long/.test(t)) return "dom";
+  if (/days on market|\bdom\b|how long|how many days|sitting/.test(t)) return "dom";
   if (/list[\s-]*to[\s-]*close|over ask|under ask|asking price/.test(t)) return "listToClose";
-  if (/trend|appreciat|going up|going down/.test(t)) return "trend";
-  if (/inventory|for sale|on the market|active listing/.test(t)) return "inventory";
+  if (/trend|appreciat|rising|increasing|decreasing|falling|dropping|going up|going down|went up|went down/.test(t)) {
+    return "trend";
+  }
+  if (asksActiveCount(t) || /inventory|for sale|on the market|active listing/.test(t)) return "inventory";
   return "overview";
 }
 
@@ -293,12 +433,45 @@ function timingAnswer(summary: MarketSummary, points: MonthPoint[]): string {
   return `${lead}${priceLine} ${detail.charAt(0).toUpperCase()}${detail.slice(1)}.`;
 }
 
-function focusedAnswer(text: string, summary: MarketSummary, points: MonthPoint[]): string {
+function monthTable(points: MonthPoint[]): string {
+  if (points.length < 2) return "";
+  return formatTable(
+    ["Month", "Sales", "Avg close"],
+    points.map((point) => [
+      monthLabel(point.month),
+      point.sales.toLocaleString("en-US"),
+      money(point.avgPrice),
+    ])
+  );
+}
+
+function summaryTable(summary: MarketSummary): string {
+  const rows = [
+    ["Median close", money(summary.medianPrice)],
+    ["Sales", summary.soldCount.toLocaleString("en-US")],
+  ];
+  if (summary.avgPrice != null) rows.push(["Average close", money(summary.avgPrice)]);
+  if (summary.avgPricePerSqft != null) rows.push(["Price per sqft", money(summary.avgPricePerSqft)]);
+  if (summary.avgDom != null) rows.push(["Days on market", String(Math.round(summary.avgDom))]);
+  if (summary.listToClosePct != null) rows.push(["List to close", `${pct(summary.listToClosePct)}%`]);
+  rows.push(["Active listings", summary.activeCount.toLocaleString("en-US")]);
+  return formatTable(["Stat", "Value"], rows);
+}
+
+function focusedAnswer(
+  text: string,
+  summary: MarketSummary,
+  points: MonthPoint[],
+  window: DateWindow | null,
+  listingType: string | null
+): string {
   const focus = marketFocus(text);
   const basis = salesBasis(summary, points);
   const city = summary.city;
 
-  if (focus === "timing") return timingAnswer(summary, points);
+  if (focus === "timing") {
+    return `${timingAnswer(summary, points)}\n\n${summaryTable(summary)}`;
+  }
   if (focus === "pricePerSqft") {
     if (summary.avgPricePerSqft == null) {
       return `I don't have enough square footage on ${city} sales to give a price per sqft.`;
@@ -316,7 +489,17 @@ function focusedAnswer(text: string, summary: MarketSummary, points: MonthPoint[
   }
   if (focus === "avgPrice") {
     if (summary.avgPrice == null) return `I don't have an average sale price for ${city}.`;
-    return `The average sale price in ${city} is ${money(summary.avgPrice)}. The median is ${money(summary.medianPrice)}, based on ${basis}.`;
+    const when = window ? ` from ${window.label}` : "";
+    const move = window ? priceChange(points) : null;
+    const direction = !move
+      ? ""
+      : move.change > 1
+        ? ` Prices rose ${Math.abs(move.change).toFixed(1)}% inside that stretch.`
+        : move.change < -1
+          ? ` Prices fell ${Math.abs(move.change).toFixed(1)}% inside that stretch.`
+          : " Prices were about flat inside that stretch.";
+    const table = window ? monthTable(points) : "";
+    return `The average sale price in ${city}${when} is ${money(summary.avgPrice)}. The median is ${money(summary.medianPrice)}, based on ${basis}.${direction}${table ? `\n\n${table}` : ""}`;
   }
   if (focus === "dom") {
     if (summary.avgDom == null) return `I don't have days on market for ${city}.`;
@@ -327,10 +510,13 @@ function focusedAnswer(text: string, summary: MarketSummary, points: MonthPoint[
     return `${city} homes are closing at ${pct(summary.listToClosePct)}% of the asking price. ${leverageSentence(summary.listToClosePct)}`;
   }
   if (focus === "trend") {
-    return `${trendSentence(points).replace(/\.$/, "")} in ${city}, across ${basis}.`;
+    const table = monthTable(points);
+    return table ? `${trendAnswer(city, points)}\n\n${table}` : trendAnswer(city, points);
   }
   if (focus === "inventory") {
-    return `There are ${summary.activeCount.toLocaleString("en-US")} active listings in ${city} right now. ${summary.soldCount.toLocaleString("en-US")} homes sold from ${period(points)}.`;
+    const kind = listingKind(listingType);
+    const noun = kind ? `${kind} listings` : "listings";
+    return `There are ${summary.activeCount.toLocaleString("en-US")} active ${noun} in ${city} right now.`;
   }
 
   const priceBit = summary.avgPricePerSqft == null
@@ -344,9 +530,10 @@ function focusedAnswer(text: string, summary: MarketSummary, points: MonthPoint[
     summary.avgDom == null ? null : `Homes take about ${days(summary.avgDom)} to sell`,
     summary.listToClosePct == null ? null : `and close at ${pct(summary.listToClosePct)}% of asking.`,
   ].filter(Boolean).join(" ");
-  return [bits.filter(Boolean).join(" "), pace, trendSentence(points), `${summary.activeCount.toLocaleString("en-US")} homes are for sale now.`]
+  const prose = [bits.filter(Boolean).join(" "), pace, trendSentence(points), `${summary.activeCount.toLocaleString("en-US")} homes are for sale now.`]
     .filter(Boolean)
     .join(" ");
+  return `${prose}\n\n${summaryTable(summary)}`;
 }
 
 function leverageSentence(listToClose: number | null): string {
@@ -359,12 +546,23 @@ function leverageSentence(listToClose: number | null): string {
 export async function answerMarketQuestion(text: string): Promise<string | null> {
   const city = await findCity(text);
   if (!city) return null;
-  const summary = await getMarketSummary(city);
+  const window = parseDateWindow(text);
+  const focus = marketFocus(text);
+  const listingType = focus === "inventory" ? (await parsePropertyQuery(text)).type : null;
+  const summary = await getMarketSummary(city, window, listingType);
   if (!summary) {
-    return `I don't have residential sales for ${city} in the last 12 months.`;
+    if (focus === "inventory") {
+      const count = await countActive(city, listingType);
+      const kind = listingKind(listingType);
+      const noun = kind ? `${kind} listings` : "listings";
+      return `There are ${count.toLocaleString("en-US")} active ${noun} in ${city} right now.`;
+    }
+    return window
+      ? `I don't have residential sales for ${city} from ${window.label}.`
+      : `I don't have residential sales for ${city} in the last 12 months.`;
   }
-  const trend = await getPriceTrend(city);
-  return focusedAnswer(text, summary, trend);
+  const trend = await getPriceTrend(city, window);
+  return focusedAnswer(text, summary, trend, window, listingType);
 }
 
 const invokedDirectly =

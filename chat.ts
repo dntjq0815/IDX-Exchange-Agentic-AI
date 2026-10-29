@@ -9,6 +9,7 @@ import {
 import {
   answerMarketQuestion,
   cityNameOnly,
+  formatTable,
   isMarketQuestion,
 } from "./market.ts";
 import { parsePropertyQuery, type PropertyFilters } from "./parser.ts";
@@ -104,10 +105,40 @@ function count(value: number | null): string {
   return Number.isInteger(n) ? String(n) : String(n);
 }
 
-function card(listing: ListingRow): string {
-  const price = `$${Number(listing.price).toLocaleString("en-US")}`;
-  const photos = listing.PhotoCount ?? 0;
-  return `${listing.L_Address}, ${listing.L_City}\n${price} | ${count(listing.beds)} bd / ${count(listing.baths)} ba | ${photos} photos`;
+function clip(value: string, max = 34): string {
+  return value.length <= max ? value : `${value.slice(0, max - 3)}...`;
+}
+
+export function sampleQuestions(): string {
+  return [
+    "A few questions you can ask:",
+    "",
+    "How's the trend in Irvine?",
+    "Is the price rising or decreasing in Pasadena?",
+    "How's the average price from Mar 2026 to May 2026 in Pasadena?",
+    "What's the average price per sqft in San Diego?",
+    "How many days are homes sitting in Irvine?",
+    "Is it a good time to buy in Irvine?",
+    "3-bedroom condos in Irvine under $1.5M with a pool",
+  ].join("\n");
+}
+
+function wantsExamples(text: string): boolean {
+  if (/^(hi|hello|hey|help|examples?|menu|\?)$/i.test(text)) return true;
+  if (text.length > 80) return false;
+  return /\b(sample questions|example questions|what can i ask|what can you do|what should i ask)\b/i.test(text);
+}
+
+function listingTable(rows: ListingRow[]): string {
+  return formatTable(
+    ["Price", "Bd", "Ba", "Address"],
+    rows.map((listing) => [
+      `$${Number(listing.price).toLocaleString("en-US")}`,
+      count(listing.beds),
+      count(listing.baths),
+      clip(`${listing.L_Address}, ${listing.L_City}`),
+    ])
+  );
 }
 
 export async function handleMessage(
@@ -115,10 +146,11 @@ export async function handleMessage(
   message: string
 ): Promise<string> {
   const text = message.trim();
-  if (!text) return "Tell me what you're looking for.";
+  if (!text) return `Tell me what you're looking for.\n\n${sampleQuestions()}`;
+  if (wantsExamples(text)) return sampleQuestions();
   if (/^(clear|reset|start over)$/i.test(text)) {
     clearSession(userId);
-    return "Started a new search. Which city are you looking in?";
+    return `Started a new search. Which city are you looking in?\n\n${sampleQuestions()}`;
   }
 
   const before = getSession(userId);
@@ -173,6 +205,9 @@ export async function handleMessage(
   const question = missingQuestion(session);
   if (question) {
     updateSession(userId, { awaiting: questionKind(question) });
+    if (before.conversationStep === 0 && !before.city && before.maxPrice == null) {
+      return `${question}\n\n${sampleQuestions()}`;
+    }
     return question;
   }
 
@@ -191,7 +226,7 @@ export async function handleMessage(
   if (!rows.length) {
     return `${describe(session)}\n\nNo active listings matched. You can change the budget, beds, or property type.`;
   }
-  return `${describe(session)}\n\n${rows.map(card).join("\n\n")}`;
+  return `${describe(session)}\n${rows.length} active listings\n\n${listingTable(rows)}`;
 }
 
 const invokedDirectly =
@@ -201,7 +236,8 @@ const invokedDirectly =
 if (invokedDirectly) {
   const userId = "local";
   const rl = readline.createInterface({ input, output });
-  console.log("Property search. 'clear' starts over, 'quit' exits.\n");
+  console.log(`${sampleQuestions()}\n`);
+  console.log("Property search. 'clear' starts over, 'help' shows the examples, 'quit' exits.\n");
   rl.setPrompt("You: ");
   rl.prompt();
   for await (const line of rl) {
