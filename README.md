@@ -71,6 +71,17 @@ It tries to answer the thing you asked. A timing question comes back as a yes, a
 
 The local sold rows in that 12-month window only cover part of the year, so a trend is first month to last month in the data, not a made-up full year.
 
+## Week 6
+
+`embeddings.ts` builds a vector for each active listing from the type, city, beds, baths, sqft, year, price, and remarks. The model is OpenAI `text-embedding-3-small`. The vectors sit in `.listing-embeddings`, not in MySQL, and that file stays out of git. A later run skips a listing when its price, remarks length, and modification time have not changed.
+
+```bash
+npm run embed
+npm run similar -- "quiet condo with a view in Irvine"
+```
+
+In the chat, "homes like ..." uses that index and returns the five closest listings. "Similar" on its own, after a search, uses the last home you were shown. Week 7 is the part that also checks those prices against sold comps.
+
 ## WhatsApp
 
 `plugins/idx-agent` is the OpenClaw hook. On a WhatsApp message it runs `reply.ts`, which calls the same `handleMessage` as `npm run chat`. Replies are capped at 4,000 characters.
@@ -85,4 +96,4 @@ Node 24. From this directory:
 npm install
 ```
 
-Put the MySQL settings in `.env`, then use `parse`, `search`, `chat`, or `market` as above. `search`, `chat`, and `market` load `.env` themselves.
+Put the MySQL settings and `OPENAI_API_KEY` in `.env`, then use `parse`, `search`, `chat`, `market`, `embed`, or `similar` as above. The database commands and the embedding build load `.env` themselves.

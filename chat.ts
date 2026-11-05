@@ -12,6 +12,12 @@ import {
   formatTable,
   isMarketQuestion,
 } from "./market.ts";
+import {
+  findSimilarListings,
+  findSimilarToListing,
+  isSimilarQuestion,
+  type SimilarHit,
+} from "./embeddings.ts";
 import { parsePropertyQuery, type PropertyFilters } from "./parser.ts";
 import {
   clearSession,
@@ -120,6 +126,7 @@ export function sampleQuestions(): string {
     "How many days are homes sitting in Irvine?",
     "Is it a good time to buy in Irvine?",
     "3-bedroom condos in Irvine under $1.5M with a pool",
+    "Homes like a quiet condo with a view in Irvine",
   ].join("\n");
 }
 
@@ -127,6 +134,19 @@ function wantsExamples(text: string): boolean {
   if (/^(hi|hello|hey|help|examples?|menu|\?)$/i.test(text)) return true;
   if (text.length > 80) return false;
   return /\b(sample questions|example questions|what can i ask|what can you do|what should i ask)\b/i.test(text);
+}
+
+function similarTable(hits: SimilarHit[]): string {
+  return formatTable(
+    ["Match", "Price", "Bd", "Ba", "Address"],
+    hits.map((hit) => [
+      `${Math.round(hit.score * 100)}%`,
+      `$${Math.round(hit.price).toLocaleString("en-US")}`,
+      hit.beds,
+      hit.baths,
+      clip(`${hit.address}, ${hit.city}`),
+    ])
+  );
 }
 
 function listingTable(rows: ListingRow[]): string {
@@ -171,6 +191,26 @@ export async function handleMessage(
       return (await answerMarketQuestion(question)) ?? `I don't have sales for ${city}.`;
     }
     updateSession(userId, { awaiting: undefined, marketQuestion: undefined });
+  }
+
+  if (isSimilarQuestion(text)) {
+    try {
+      const bare = /^(similar|show me similar|more like (this|that)|homes like this|listings like this)$/i.test(text);
+      const hits = bare && before.lastResults?.[0]
+        ? await findSimilarToListing(before.lastResults[0].L_ListingID)
+        : await findSimilarListings(text, (await parsePropertyQuery(text)).city);
+      if (!hits.length) return "Nothing in the index was close to that.";
+      return `Closest listings:\n\n${similarTable(hits)}`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "";
+      if (message === "NO_INDEX") {
+        return "The listing index is not built yet. From the project folder, run npm run embed.";
+      }
+      if (message === "NOT_IN_INDEX") {
+        return "That listing is not in the index. Describe the home you want instead.";
+      }
+      return "I hit a problem searching similar homes. Try the question again.";
+    }
   }
 
   let filters = await parsePropertyQuery(text);
