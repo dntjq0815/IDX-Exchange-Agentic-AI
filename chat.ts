@@ -1,3 +1,4 @@
+import { ragAnswer } from "./rag.ts";
 import { pathToFileURL } from "node:url";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -14,10 +15,10 @@ import {
 } from "./market.ts";
 import {
   findSimilarListings,
-  findSimilarToListing,
   isSimilarQuestion,
   type SimilarHit,
 } from "./embeddings.ts";
+import { compLine, recommendFor, type Recommendation } from "./recommend.ts";
 import { parsePropertyQuery, type PropertyFilters } from "./parser.ts";
 import {
   clearSession,
@@ -127,6 +128,7 @@ export function sampleQuestions(): string {
     "Is it a good time to buy in Irvine?",
     "3-bedroom condos in Irvine under $1.5M with a pool",
     "Homes like a quiet condo with a view in Irvine",
+    "After a search, say similar to compare nearby homes with recent sales",
   ].join("\n");
 }
 
@@ -134,6 +136,25 @@ function wantsExamples(text: string): boolean {
   if (/^(hi|hello|hey|help|examples?|menu|\?)$/i.test(text)) return true;
   if (text.length > 80) return false;
   return /\b(sample questions|example questions|what can i ask|what can you do|what should i ask)\b/i.test(text);
+}
+
+function countOrBlank(value: number | null): string {
+  return value == null ? "n/a" : String(value);
+}
+
+function recommendationText(anchor: ListingRow, recs: Recommendation[], anchorComp: string): string {
+  const size = anchor.sqft == null ? "unknown size" : `${Number(anchor.sqft).toLocaleString("en-US")} sqft`;
+  const blocks = recs.map((rec) => [
+    `${rec.address}, ${rec.city}`,
+    `${`$${Math.round(rec.price).toLocaleString("en-US")}`} | ${countOrBlank(rec.beds)} bd | ${countOrBlank(rec.baths)} ba | ${rec.sqft == null ? "n/a" : Number(rec.sqft).toLocaleString("en-US")} sqft | ${Math.round(rec.match * 100)}% match`,
+    rec.compLine,
+  ].join("\n"));
+  return [
+    `Similar to ${anchor.L_Address}, ${anchor.L_City} ($${Number(anchor.price).toLocaleString("en-US")}, ${countOrBlank(anchor.beds)} bd, ${size}).`,
+    anchorComp,
+    "",
+    blocks.join("\n\n"),
+  ].join("\n");
 }
 
 function similarTable(hits: SimilarHit[]): string {
@@ -161,6 +182,14 @@ function listingTable(rows: ListingRow[]): string {
   );
 }
 
+function isKnowledgeQuestion(text: string): boolean {
+  return (
+    /\b(what does|what is|define|explain|meaning of)\b/i.test(text) &&
+    /\b(DOM|escrow|comp|comps|cap rate|list.to.close|MLS|field|column|ratio)\b/i.test(text)
+  ) ||
+    /\b(columns|fields|schema)\b.*\b(california_sold|rets_property)\b/i.test(text);
+}
+
 export async function handleMessage(
   userId: string,
   message: string
@@ -168,6 +197,11 @@ export async function handleMessage(
   const text = message.trim();
   if (!text) return `Tell me what you're looking for.\n\n${sampleQuestions()}`;
   if (wantsExamples(text)) return sampleQuestions();
+  
+  if (isKnowledgeQuestion(text)) {
+    return await ragAnswer(text);
+  }
+  
   if (/^(clear|reset|start over)$/i.test(text)) {
     clearSession(userId);
     return `Started a new search. Which city are you looking in?\n\n${sampleQuestions()}`;
@@ -195,10 +229,22 @@ export async function handleMessage(
 
   if (isSimilarQuestion(text)) {
     try {
-      const bare = /^(similar|show me similar|more like (this|that)|homes like this|listings like this)$/i.test(text);
-      const hits = bare && before.lastResults?.[0]
-        ? await findSimilarToListing(before.lastResults[0].L_ListingID)
-        : await findSimilarListings(text, (await parsePropertyQuery(text)).city);
+      const bare = /^(similar|show me similar|more like (this|that)|homes like this|listings like this|recommend|recommendations?)$/i.test(text);
+      const anchor = before.lastResults?.[0];
+      if (bare && !anchor) {
+        return "Search for a home first, then say similar. Or describe one, such as homes like a quiet condo with a view in Irvine.";
+      }
+      if (bare && anchor) {
+        const recs = await recommendFor(anchor);
+        if (!recs.length) return "Nothing else in that city was close to the last home.";
+        const anchorComp = await compLine(
+          anchor.L_City,
+          anchor.sqft == null ? null : Number(anchor.sqft),
+          Number(anchor.price)
+        );
+        return recommendationText(anchor, recs, anchorComp);
+      }
+      const hits = await findSimilarListings(text, (await parsePropertyQuery(text)).city);
       if (!hits.length) return "Nothing in the index was close to that.";
       return `Closest listings:\n\n${similarTable(hits)}`;
     } catch (err) {
@@ -239,7 +285,7 @@ export async function handleMessage(
   }
 
   if (before.lastResults && remembered(before) === remembered(session)) {
-    return "That didn't change the search. Give a city, a budget like $900k, a bed count, or condo, townhome, or single family.";
+    return `Same search as last time: ${describe(session)}\n${before.lastResults.length} active listings\n\n${listingTable(before.lastResults)}\n\nSend "similar" for homes close to the first one, checked against recent sales.`;
   }
 
   const question = missingQuestion(session);

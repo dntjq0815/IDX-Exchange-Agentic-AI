@@ -83,12 +83,12 @@ export async function findCity(text: string): Promise<string | null> {
 
   const rows = await query<{ City: string }>(
     `SELECT City
-     FROM california_sold
-     WHERE CHAR_LENGTH(City) > 3
-       AND ? LIKE CONCAT('%', City, '%')
-     GROUP BY City
-     ORDER BY CHAR_LENGTH(City) DESC
-     LIMIT 1`,
+    FROM california_sold
+    WHERE CHAR_LENGTH(City) > 3
+      AND ? LIKE CONCAT('%', City, '%')
+    GROUP BY City
+    ORDER BY CHAR_LENGTH(City) DESC
+    LIMIT 1`,
     [text]
   );
   return rows[0]?.City ?? null;
@@ -99,8 +99,8 @@ export async function cityNameOnly(text: string): Promise<string | null> {
   if (!/^[A-Za-z]+(?:\s+[A-Za-z]+){0,2}$/.test(name)) return null;
   const rows = await query<{ City: string }>(
     `SELECT City FROM california_sold
-     WHERE LOWER(City) = LOWER(?)
-     LIMIT 1`,
+    WHERE LOWER(City) = LOWER(?)
+    LIMIT 1`,
     [name]
   );
   return rows[0]?.City ?? null;
@@ -111,11 +111,17 @@ function parseDateWindow(text: string): DateWindow | null {
   const hits = [...text.matchAll(re)];
   if (hits.length === 0) return null;
   const toParts = (hit: RegExpMatchArray) => ({
-    month: MONTH_INDEX[hit[1].toLowerCase()] ?? 0,
-    year: Number(hit[2]),
+    month: MONTH_INDEX[(hit[1] ?? "").toLowerCase()] ?? 0,
+    year: Number(hit[2] ?? 0),
   });
-  let start = toParts(hits[0]);
-  let end = toParts(hits[hits.length - 1]);
+  
+  const firstHit = hits[0];
+  const lastHit = hits[hits.length - 1];
+  
+  if (!firstHit || !lastHit) return null;
+  
+  let start = toParts(firstHit);
+  let end = toParts(lastHit);
   if (!start.month || !end.month) return null;
   const startKey = start.year * 12 + start.month;
   const endKey = end.year * 12 + end.month;
@@ -161,8 +167,8 @@ function soldFilter(window: DateWindow | null): { sql: string; extra: string[] }
 
 async function countActive(city: string, type: string | null): Promise<number> {
   let sql = `SELECT COUNT(*) AS active_count
-     FROM rets_property
-     WHERE LOWER(L_City) = LOWER(?) AND L_Status = 'Active'`;
+    FROM rets_property
+    WHERE LOWER(L_City) = LOWER(?) AND L_Status = 'Active'`;
   const params: unknown[] = [city];
   if (type) {
     sql += " AND L_Type_ = ?";
@@ -199,15 +205,15 @@ export async function getMarketSummary(
     avg_price_per_sqft: number | null;
   }>(
     `SELECT
-       MAX(City) AS city,
-       COUNT(*) AS sold_count,
-       ROUND(AVG(ClosePrice), 0) AS avg_price,
-       ROUND(AVG(NULLIF(LivingArea, 0)), 0) AS avg_sqft,
-       ROUND(AVG(DaysOnMarket), 1) AS avg_dom,
-       ROUND(AVG(ClosePrice / NULLIF(ListPrice, 0)) * 100, 1) AS list_to_close_pct,
-       ROUND(AVG(ClosePrice / NULLIF(LivingArea, 0)), 0) AS avg_price_per_sqft
-     FROM california_sold
-     WHERE ${where}`,
+      MAX(City) AS city,
+      COUNT(*) AS sold_count,
+      ROUND(AVG(ClosePrice), 0) AS avg_price,
+      ROUND(AVG(NULLIF(LivingArea, 0)), 0) AS avg_sqft,
+      ROUND(AVG(DaysOnMarket), 1) AS avg_dom,
+      ROUND(AVG(ClosePrice / NULLIF(ListPrice, 0)) * 100, 1) AS list_to_close_pct,
+      ROUND(AVG(ClosePrice / NULLIF(LivingArea, 0)), 0) AS avg_price_per_sqft
+    FROM california_sold
+    WHERE ${where}`,
     params
   );
 
@@ -215,16 +221,16 @@ export async function getMarketSummary(
 
   const [median] = await query<{ median_price: number }>(
     `WITH priced AS (
-       SELECT
-         ClosePrice,
-         ROW_NUMBER() OVER (ORDER BY ClosePrice) AS rn,
-         COUNT(*) OVER () AS cnt
-       FROM california_sold
-       WHERE ${where}
-     )
-     SELECT ROUND(AVG(ClosePrice), 0) AS median_price
-     FROM priced
-     WHERE rn IN (FLOOR((cnt + 1) / 2), FLOOR((cnt + 2) / 2))`,
+      SELECT
+        ClosePrice,
+        ROW_NUMBER() OVER (ORDER BY ClosePrice) AS rn,
+        COUNT(*) OVER () AS cnt
+      FROM california_sold
+      WHERE ${where}
+    )
+    SELECT ROUND(AVG(ClosePrice), 0) AS median_price
+    FROM priced
+    WHERE rn IN (FLOOR((cnt + 1) / 2), FLOOR((cnt + 2) / 2))`,
     params
   );
 
@@ -252,13 +258,13 @@ export async function getPriceTrend(
   const filter = soldFilter(window);
   const rows = await query<{ month: string; sales: number; avg_price: number }>(
     `SELECT
-       DATE_FORMAT(CloseDate, '%Y-%m') AS month,
-       COUNT(*) AS sales,
-       ROUND(AVG(ClosePrice), 0) AS avg_price
-     FROM california_sold
-     WHERE ${filter.sql}
-     GROUP BY DATE_FORMAT(CloseDate, '%Y-%m')
-     ORDER BY month`,
+      DATE_FORMAT(CloseDate, '%Y-%m') AS month,
+      COUNT(*) AS sales,
+      ROUND(AVG(ClosePrice), 0) AS avg_price
+    FROM california_sold
+    WHERE ${filter.sql}
+    GROUP BY DATE_FORMAT(CloseDate, '%Y-%m')
+    ORDER BY month`,
     [city, ...filter.extra]
   );
   return rows.map((row) => ({

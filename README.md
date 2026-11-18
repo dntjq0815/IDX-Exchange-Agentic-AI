@@ -80,7 +80,11 @@ npm run embed
 npm run similar -- "quiet condo with a view in Irvine"
 ```
 
-In the chat, "homes like ..." uses that index and returns the five closest listings. "Similar" on its own, after a search, uses the last home you were shown. Week 7 is the part that also checks those prices against sold comps.
+In the chat, "homes like ..." uses that index and returns the five closest listings. "Similar" on its own, after a search, uses the last home you were shown.
+
+## Week 7
+
+After a search, "similar" or "recommend" scores other active homes in that city on the embedding match plus price, beds, and square footage. Each of the five also gets a line against recent sold homes in the same city whose living area is within 20% of that listing. The line says whether the list price sits above, under, or close to the median of those sales. "Homes like ..." still uses the embedding match only, because there is no one listing to compare.
 
 ## WhatsApp
 

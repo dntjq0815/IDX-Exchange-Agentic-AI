@@ -9,12 +9,14 @@ export interface UserSession {
   beds?: number;
   baths?: number;
   sqft?: number;
-  type?: string;
+  type?: string | undefined;
   pool?: string;
   hasView?: string;
   anyType?: boolean;
-  awaiting?: "city" | "budget" | "type" | "market";
-  marketQuestion?: string;
+
+  awaiting?: "city" | "budget" | "type" | "market" | undefined;
+  marketQuestion?: string | undefined;
+
   lastResults?: ListingRow[];
   conversationStep: number;
 }

@@ -1,24 +1,32 @@
-# Secrets
+# Environment and Credentials
 .env
 .env.*
 !.env.example
 
-# Python
+# Dependencies
 venv/
 __pycache__/
 *.pyc
+node_modules/
 
-# Company/raw data
+# Local Data
 *.sql
 *.csv
 *.json
+data/
+*.sqlite
 
 # Logs
 *.log
 
 # macOS
 .DS_Store
-node_modules/
 .session-store.json
 .listing-embeddings
 .listing-embeddings.tmp
+
+# Week 8 RAG knowledge index
+.rag/
+
+# Confidential IDX schema reference
+knowledge/

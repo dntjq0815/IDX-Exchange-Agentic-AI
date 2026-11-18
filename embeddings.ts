@@ -50,8 +50,8 @@ export interface SimilarHit {
 }
 
 export function isSimilarQuestion(text: string): boolean {
-  return /\b(similar homes|similar listings|homes like|listings like|something like|show me similar|more like this)\b/i.test(text)
-    || /^(similar|more like (this|that))$/i.test(text.trim());
+  return /\b(similar homes|similar listings|homes like|listings like|something like|show me similar|more like this|recommend)\b/i.test(text)
+    || /^(similar|more like (this|that)|recommendations?)$/i.test(text.trim());
 }
 
 export function listingText(row: {
@@ -249,7 +249,13 @@ function packIndex(byId: Map<string, { row: IndexRow; vector: Float32Array }>): 
   return { model: MODEL, dim: DIMENSIONS, rows, vectors };
 }
 
-function scoreAll(query: Float32Array, index: EmbeddingIndex, city?: string | null, skipId?: string): SimilarHit[] {
+function scoreAll(
+  query: Float32Array,
+  index: EmbeddingIndex,
+  city?: string | null,
+  skipId?: string,
+  limit = 5
+): SimilarHit[] {
   let queryNorm = 0;
   for (const value of query) queryNorm += value * value;
   queryNorm = Math.sqrt(queryNorm) || 1;
@@ -269,7 +275,7 @@ function scoreAll(query: Float32Array, index: EmbeddingIndex, city?: string | nu
     hits.push({ ...row, score: dot / (queryNorm * (Math.sqrt(norm) || 1)) });
   }
   hits.sort((a, b) => b.score - a.score);
-  return hits.slice(0, 5);
+  return hits.slice(0, limit);
 }
 
 export async function findSimilarListings(text: string, city?: string | null, skipId?: string): Promise<SimilarHit[]> {
@@ -282,14 +288,14 @@ export async function findSimilarListings(text: string, city?: string | null, sk
   return scoreAll(Float32Array.from(vector), index, city, skipId);
 }
 
-export async function findSimilarToListing(listingId: string): Promise<SimilarHit[]> {
+export async function findSimilarToListing(listingId: string, limit = 5): Promise<SimilarHit[]> {
   const index = loadIndex();
   if (!index || index.rows.length === 0) throw new Error("NO_INDEX");
   const rowIndex = index.rows.findIndex((row) => row.id === listingId);
   if (rowIndex === -1) throw new Error("NOT_IN_INDEX");
   const query = index.vectors.slice(rowIndex * index.dim, (rowIndex + 1) * index.dim);
   const city = index.rows[rowIndex]?.city;
-  return scoreAll(query, index, city, listingId);
+  return scoreAll(query, index, city, listingId, limit);
 }
 
 const invokedDirectly =
@@ -303,7 +309,10 @@ if (invokedDirectly) {
   const city = cityFlag === -1 ? undefined : process.argv[cityFlag + 1];
   const limit = limitFlag === -1 ? undefined : Number(process.argv[limitFlag + 1]);
   if (command === "build") {
-    await buildEmbeddingIndex({ city, limit });
+    await buildEmbeddingIndex({
+      ...(city !== undefined ? { city } : {}),
+      ...(limit !== undefined ? { limit } : {})
+    });
   } else if (command === "search") {
     const sentence = process.argv.slice(3).join(" ").replace(/--city\s+\S+|--limit\s+\S+/g, "").trim();
     const hits = await findSimilarListings(sentence, city);
